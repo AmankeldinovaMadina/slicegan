@@ -1,0 +1,8 @@
+__pycache__
+venv
+.env
+runs
+data/*runs
+data/micrographs*
+data/*temp*
+data/anns.json
