@@ -1,4 +1,6 @@
-# SliceGAN Task Deliverables (Mac M1)
+
+
+<img width="1435" height="832" alt="Screenshot 2026-03-25 at 15 03 16" src="https://github.com/user-attachments/assets/e4c0afd6-32a5-4f00-a85e-d196d183dcf8" />
 
 ## 1) Setup and generation using pretrained models
 
