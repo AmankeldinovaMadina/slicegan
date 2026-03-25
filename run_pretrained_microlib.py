@@ -134,22 +134,17 @@ def normalized_surface_density_2d(binary_img: np.ndarray) -> float:
     return float((h_trans + v_trans) / b.size)
 
 
-def _phase_mapped_candidates(
-    generated_bin: np.ndarray, allow_phase_inversion: bool
-) -> List[Tuple[str, np.ndarray]]:
-    cand = [("generated", generated_bin)]
-    if allow_phase_inversion:
-        cand.append(("inverted_generated", 1 - generated_bin))
-    return cand
+def percent_error(reference: float, value: float) -> float:
+    if abs(reference) < 1e-12:
+        return float("nan")
+    return float(abs(value - reference) / abs(reference) * 100.0)
 
 
 def compare_slice_metrics(
     original_bin: np.ndarray,
     generated_bin: np.ndarray,
-    allow_phase_inversion: bool = True,
 ) -> Dict[str, Any]:
     """Compare one generated slice to reference image and return a metric bundle."""
-    best = None
 
     max_r = int(
         min(
@@ -164,35 +159,26 @@ def compare_slice_metrics(
     sv_orig = normalized_surface_density_2d(original_bin)
     vf_orig = float(original_bin.mean())
 
-    for name, cand in _phase_mapped_candidates(generated_bin, allow_phase_inversion):
-        vf_gen = float(cand.mean())
-        _, s2_gen = radial_two_point(cand, max_r=max_r)
-        sv_gen = normalized_surface_density_2d(cand)
-        vf_err = abs(vf_orig - vf_gen)
-        s2_err = float(np.nanmean(np.abs(s2_orig - s2_gen)))
-        sv_err = abs(sv_orig - sv_gen)
-        score = vf_err + s2_err + sv_err
-        pack = {
-            "candidate": name,
-            "vf_original": vf_orig,
-            "vf_generated": vf_gen,
-            "vf_abs_error": vf_err,
-            "sv_original": sv_orig,
-            "sv_generated": sv_gen,
-            "sv_abs_error": sv_err,
-            "s2_original": s2_orig,
-            "s2_generated": s2_gen,
-            "s2_mae": s2_err,
-            "score": score,
-            "r": r_orig,
-            "generated_bin_used": cand,
-        }
-        if best is None or pack["score"] < best["score"]:
-            best = pack
-
-    if best is None:
-        raise RuntimeError("Failed to compute phase-invariant metrics")
-    return best
+    vf_gen = float(generated_bin.mean())
+    _, s2_gen = radial_two_point(generated_bin, max_r=max_r)
+    sv_gen = normalized_surface_density_2d(generated_bin)
+    vf_err = abs(vf_orig - vf_gen)
+    s2_err = float(np.nanmean(np.abs(s2_orig - s2_gen)))
+    sv_err = abs(sv_orig - sv_gen)
+    return {
+        "vf_original": vf_orig,
+        "vf_generated": vf_gen,
+        "vf_abs_error": vf_err,
+        "vf_percent_error": percent_error(vf_orig, vf_gen),
+        "sv_original": sv_orig,
+        "sv_generated": sv_gen,
+        "sv_abs_error": sv_err,
+        "sv_percent_error": percent_error(sv_orig, sv_gen),
+        "s2_original": s2_orig,
+        "s2_generated": s2_gen,
+        "s2_mae": s2_err,
+        "r": r_orig,
+    }
 
 
 def evenly_spaced_indices(length: int, n_samples: int) -> np.ndarray:
@@ -349,14 +335,54 @@ def run(
     original_bin = to_binary(
         original, threshold_method=threshold_method, threshold_value=threshold_value
     )
+    vf_orig_ref = float(original_bin.mean())
+    sv_orig_ref = float(normalized_surface_density_2d(original_bin))
 
     z_channels = int(gf[0])
     effective_phase_inversion = allow_phase_inversion and image_type == "twophase"
+
+    if image_type == "grayscale":
+        print(
+            f"Skipping technical validation for {model_id}: paper protocol applies these metrics to n-phase only"
+        )
+        noise_seed = seeds[0]
+        torch.manual_seed(noise_seed)
+        noise = torch.randn(1, z_channels, lf, lf, lf, device=device)
+        with torch.no_grad():
+            raw = netG(noise)
+        vol = postprocess_volume(raw, image_type)
+        tif_path = out_dir / f"{model_id}_generated_lf{lf}_seed{noise_seed}.tif"
+        tifffile.imwrite(tif_path, vol)
+
+        metrics = {
+            "model_id": model_id,
+            "device": str(device),
+            "image_type": image_type,
+            "latent_factor_lf": lf,
+            "seeds": seeds,
+            "technical_validation_applicable": False,
+            "technical_validation_skipped_reason": "Paper technical validation metrics are defined for n-phase materials, not grayscale.",
+            "generator_files": {
+                "generator_weights": str(gen_path),
+                "params_file": str(params_path),
+                "model_prefix": str(model_prefix),
+            },
+            "generated_tifs": [str(tif_path)],
+            "generated_volume_shapes": [list(vol.shape)],
+            "original_png": str(original_png),
+        }
+
+        metrics_path = out_dir / f"{model_id}_metrics.json"
+        with open(metrics_path, "w", encoding="utf-8") as fh:
+            json.dump(metrics, fh, indent=2)
+        print(json.dumps(metrics, indent=2))
+        return
 
     comparisons: List[Dict[str, Any]] = []
     generated_tifs: List[str] = []
     per_seed_summary: List[Dict[str, Any]] = []
     volume_shapes: List[List[int]] = []
+    phase_mapping_counts = {"generated": 0, "inverted_generated": 0}
 
     for seed in seeds:
         torch.manual_seed(seed)
@@ -384,25 +410,40 @@ def run(
             sample_mode=slice_sample_mode,
         )
 
-        seed_comparisons: List[Dict[str, Any]] = []
-        for row in slice_rows:
-            generated_bin = to_binary(
-                row["slice"],
-                threshold_method=threshold_method,
-                threshold_value=threshold_value,
-            )
-            cmp_row = compare_slice_metrics(
-                original_bin=original_bin,
-                generated_bin=generated_bin,
-                allow_phase_inversion=effective_phase_inversion,
-            )
-            cmp_row["axis"] = row["axis"]
-            cmp_row["index"] = row["index"]
-            cmp_row["seed"] = seed
-            seed_comparisons.append(cmp_row)
+        def evaluate_seed_rows(invert: bool) -> List[Dict[str, Any]]:
+            seed_rows: List[Dict[str, Any]] = []
+            for row in slice_rows:
+                generated_bin = to_binary(
+                    row["slice"],
+                    threshold_method=threshold_method,
+                    threshold_value=threshold_value,
+                )
+                if invert:
+                    generated_bin = 1 - generated_bin
+                cmp_row = compare_slice_metrics(
+                    original_bin=original_bin,
+                    generated_bin=generated_bin,
+                )
+                cmp_row["axis"] = row["axis"]
+                cmp_row["index"] = row["index"]
+                cmp_row["seed"] = seed
+                cmp_row["mapping"] = "inverted_generated" if invert else "generated"
+                seed_rows.append(cmp_row)
+            return seed_rows
+
+        seed_comparisons = evaluate_seed_rows(invert=False)
+        if effective_phase_inversion:
+            inv_comparisons = evaluate_seed_rows(invert=True)
+            s2_raw, _ = aggregate_metric_values(seed_comparisons, "s2_mae")
+            s2_inv, _ = aggregate_metric_values(inv_comparisons, "s2_mae")
+            if s2_inv < s2_raw:
+                seed_comparisons = inv_comparisons
 
         if not seed_comparisons:
             raise RuntimeError(f"No slices were evaluated for seed={seed}")
+
+        used_mapping = str(seed_comparisons[0]["mapping"])
+        phase_mapping_counts[used_mapping] += len(seed_comparisons)
 
         vol_bin = to_binary_volume(
             vol,
@@ -413,8 +454,13 @@ def run(
         nsd3d = normalized_surface_density_3d(vol_bin)
 
         vf_err_mean, _ = aggregate_metric_values(seed_comparisons, "vf_abs_error")
+        vf_pct_mean, _ = aggregate_metric_values(seed_comparisons, "vf_percent_error")
         sv_err_mean, _ = aggregate_metric_values(seed_comparisons, "sv_abs_error")
+        sv_pct_mean, _ = aggregate_metric_values(seed_comparisons, "sv_percent_error")
         s2_mae_mean, _ = aggregate_metric_values(seed_comparisons, "s2_mae")
+
+        vf3d_abs_err = abs(vf_orig_ref - vf3d)
+        sv3d_abs_err = abs(sv_orig_ref - nsd3d)
 
         per_seed_summary.append(
             {
@@ -423,9 +469,18 @@ def run(
                 "volume_shape": list(vol.shape),
                 "volume_fraction_3d_generated": vf3d,
                 "normalized_surface_density_3d_generated": nsd3d,
+                "volume_fraction_3d_abs_error": vf3d_abs_err,
+                "volume_fraction_3d_percent_error": percent_error(vf_orig_ref, vf3d),
+                "normalized_surface_density_3d_abs_error": sv3d_abs_err,
+                "normalized_surface_density_3d_percent_error": percent_error(
+                    sv_orig_ref, nsd3d
+                ),
+                "phase_mapping_used": used_mapping,
                 "slice_metric_means": {
                     "volume_fraction_abs_error": vf_err_mean,
+                    "volume_fraction_percent_error": vf_pct_mean,
                     "normalized_surface_density_abs_error": sv_err_mean,
+                    "normalized_surface_density_percent_error": sv_pct_mean,
                     "two_point_mae": s2_mae_mean,
                 },
             }
@@ -435,21 +490,52 @@ def run(
     if not comparisons:
         raise RuntimeError("No slices were evaluated")
 
-    phase_counts = {
-        "generated": int(sum(1 for c in comparisons if c["candidate"] == "generated")),
-        "inverted_generated": int(
-            sum(1 for c in comparisons if c["candidate"] == "inverted_generated")
-        ),
-    }
-
-    best = min(comparisons, key=lambda x: float(x["score"]))
+    best = min(comparisons, key=lambda x: float(x["s2_mae"]))
     vf_orig = float(best["vf_original"])
     sv_orig = float(best["sv_original"])
 
-    vf_gen_mean, vf_gen_std = aggregate_metric_values(comparisons, "vf_generated")
-    vf_err_mean, vf_err_std = aggregate_metric_values(comparisons, "vf_abs_error")
-    sv_gen_mean, sv_gen_std = aggregate_metric_values(comparisons, "sv_generated")
-    sv_err_mean, sv_err_std = aggregate_metric_values(comparisons, "sv_abs_error")
+    vf_gen_mean = float(
+        np.mean([r["volume_fraction_3d_generated"] for r in per_seed_summary])
+    )
+    vf_gen_std = float(
+        np.std([r["volume_fraction_3d_generated"] for r in per_seed_summary])
+    )
+    vf_err_mean = float(
+        np.mean([r["volume_fraction_3d_abs_error"] for r in per_seed_summary])
+    )
+    vf_err_std = float(
+        np.std([r["volume_fraction_3d_abs_error"] for r in per_seed_summary])
+    )
+    vf_pct_mean = float(
+        np.mean([r["volume_fraction_3d_percent_error"] for r in per_seed_summary])
+    )
+    vf_pct_std = float(
+        np.std([r["volume_fraction_3d_percent_error"] for r in per_seed_summary])
+    )
+
+    sv_gen_mean = float(
+        np.mean([r["normalized_surface_density_3d_generated"] for r in per_seed_summary])
+    )
+    sv_gen_std = float(
+        np.std([r["normalized_surface_density_3d_generated"] for r in per_seed_summary])
+    )
+    sv_err_mean = float(
+        np.mean([r["normalized_surface_density_3d_abs_error"] for r in per_seed_summary])
+    )
+    sv_err_std = float(
+        np.std([r["normalized_surface_density_3d_abs_error"] for r in per_seed_summary])
+    )
+    sv_pct_mean = float(
+        np.mean(
+            [r["normalized_surface_density_3d_percent_error"] for r in per_seed_summary]
+        )
+    )
+    sv_pct_std = float(
+        np.std(
+            [r["normalized_surface_density_3d_percent_error"] for r in per_seed_summary]
+        )
+    )
+
     s2_mae_mean, s2_mae_std = aggregate_metric_values(comparisons, "s2_mae")
 
     s2_gen_stack = np.stack([c["s2_generated"] for c in comparisons], axis=0)
@@ -495,7 +581,7 @@ def run(
     )
     ax3.set_ylabel("Phase Volume Fraction")
     ax3.set_title(
-        f"Volume Fraction (mean abs err={vf_err_mean:.4f}, std={vf_err_std:.4f})"
+        f"VF 3D vs 2D (mean % err={vf_pct_mean:.2f}%, std={vf_pct_std:.2f}%)"
     )
     ax3.set_ylim(0, 1)
 
@@ -541,6 +627,12 @@ def run(
             "threshold_value": threshold_value,
             "allow_phase_inversion": allow_phase_inversion,
             "effective_phase_inversion": effective_phase_inversion,
+            "phase_mapping_policy": "per-seed global mapping; no per-slice optimization",
+            "technical_validation_applicable": True,
+            "paper_alignment": {
+                "vf_and_surface_reported_as_percent_error": True,
+                "n_phase_only_validation": True,
+            },
             "metric_methods": {
                 "volume_fraction": "phase_fraction",
                 "normalized_surface_density_2d": "pixel-phase-boundary-length-per-pixel",
@@ -563,11 +655,15 @@ def run(
             "volume_fraction_generated_std": vf_gen_std,
             "volume_fraction_abs_error_mean": vf_err_mean,
             "volume_fraction_abs_error_std": vf_err_std,
+            "volume_fraction_percent_error_mean": vf_pct_mean,
+            "volume_fraction_percent_error_std": vf_pct_std,
             "normalized_surface_density_original": sv_orig,
             "normalized_surface_density_generated_mean": sv_gen_mean,
             "normalized_surface_density_generated_std": sv_gen_std,
             "normalized_surface_density_abs_error_mean": sv_err_mean,
             "normalized_surface_density_abs_error_std": sv_err_std,
+            "normalized_surface_density_percent_error_mean": sv_pct_mean,
+            "normalized_surface_density_percent_error_std": sv_pct_std,
             "two_point_mae_mean": s2_mae_mean,
             "two_point_mae_std": s2_mae_std,
             "volume_fraction_3d_generated_mean": float(
@@ -596,17 +692,23 @@ def run(
                 "volume_fraction_abs_error": [
                     float(c["vf_abs_error"]) for c in comparisons
                 ],
+                "volume_fraction_percent_error": [
+                    float(c["vf_percent_error"]) for c in comparisons
+                ],
                 "normalized_surface_density_abs_error": [
                     float(c["sv_abs_error"]) for c in comparisons
                 ],
+                "normalized_surface_density_percent_error": [
+                    float(c["sv_percent_error"]) for c in comparisons
+                ],
                 "two_point_mae": [float(c["s2_mae"]) for c in comparisons],
             },
-            "phase_mapping_counts": phase_counts,
+            "phase_mapping_counts": phase_mapping_counts,
             "representative_slice": {
                 "seed": rep_seed,
                 "axis": rep_axis,
                 "index": rep_idx,
-                "mapping": best["candidate"],
+                "mapping": best["mapping"],
             },
             # Backward-compatible aliases for older summary scripts.
             "volume_fraction_generated": vf_gen_mean,
@@ -677,8 +779,8 @@ def main() -> None:
     parser.add_argument(
         "--allow-phase-inversion",
         action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Allow generated/inverted-generated best-match for label symmetry",
+        default=False,
+        help="Optional label swap for two-phase data; paper-aligned default is disabled",
     )
     parser.add_argument("--out-dir", type=str, default="outputs", help="Output folder")
     parser.add_argument(

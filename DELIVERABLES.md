@@ -17,14 +17,15 @@ Device selection is automatic and prefers Apple Silicon GPU (`mps`), then CUDA, 
 
 ## 2) Metrics and plots (Original vs Generated)
 
-Implemented metrics:
-- Volume fraction absolute error: |VF_original - VF_generated|
-- Normalized surface area density proxy absolute error
+Implemented metrics (paper-aligned):
+- Volume fraction percentage error: |VF_2D - VF_3D| / VF_2D * 100
+- Normalized surface density percentage error: |NSD_2D - NSD_3D| / NSD_2D * 100
 - Radial two-point correlation MAE: mean |S2_original - S2_generated|
 
 Note:
 - Validation is distributional, not single-slice: multiple generated slices are sampled on XY/XZ/YZ and aggregated.
-- Phase inversion is explicit and only effective for two-phase outputs.
+- Technical validation metrics follow the paper's n-phase-only scope; grayscale entries are generated but excluded from aggregate metric plots.
+- Phase inversion is disabled by default for paper alignment. If enabled, mapping is chosen globally per seed (not per-slice).
 - Surface-area-density is implemented as a voxel-interface-density proxy and reported transparently.
 
 Generated artifacts are in outputs/:
@@ -61,14 +62,14 @@ Run one model (single seed):
 
 python run_pretrained_microlib.py --model-id microstructure376 --lf 4 --out-dir outputs
 
-Run one model (A-level, multiple seeds + random slices):
+Run one model (paper-aligned protocol):
 
-python run_pretrained_microlib.py --model-id microstructure393 --lf 4 --seeds 7,11,23 --slices-per-axis 10 --slice-sample-mode random --threshold-method otsu --allow-phase-inversion --out-dir outputs
+python run_pretrained_microlib.py --model-id microstructure393 --lf 4 --seeds 7,11,23 --slices-per-axis 10 --slice-sample-mode random --threshold-method otsu --out-dir outputs
 
-Run all local models (A-level protocol):
+Run all local models (paper-aligned protocol):
 
 for m in microstructure376 microstructure393 microstructure516; do
-  python run_pretrained_microlib.py --model-id "$m" --lf 4 --seeds 7,11,23 --slices-per-axis 10 --slice-sample-mode random --threshold-method otsu --allow-phase-inversion --out-dir outputs
+  python run_pretrained_microlib.py --model-id "$m" --lf 4 --seeds 7,11,23 --slices-per-axis 10 --slice-sample-mode random --threshold-method otsu --out-dir outputs
 done
 
 Create summary table + chart:
