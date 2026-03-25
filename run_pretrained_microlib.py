@@ -1,11 +1,8 @@
-#!/usr/bin/env python3
-"""Generate 3D microstructures from pretrained Microlib SliceGAN models and
-compute simple technical-validation style metrics (original vs generated).
-"""
-
 from __future__ import annotations
 
 import argparse
+import base64
+import io
 import json
 import pickle
 import sys
@@ -18,6 +15,15 @@ import matplotlib.pyplot as plt
 import numpy as np
 import tifffile
 import torch
+from PIL import Image
+
+try:
+    import plotly.graph_objects as go
+    from skimage import measure
+
+    HAS_3D_RENDER_DEPS = True
+except Exception:
+    HAS_3D_RENDER_DEPS = False
 
 # Import the Microlib SliceGAN architecture helper.
 REPO_ROOT = Path(__file__).resolve().parent
@@ -279,10 +285,96 @@ def download_original_png(model_id: str, out_dir: Path) -> Path:
 
 
 def load_gray_png(path: Path) -> np.ndarray:
-    from PIL import Image
-
     img = Image.open(path).convert("L")
     return np.asarray(img, dtype=np.uint8)
+
+
+def save_side_by_side_html(
+    volume: np.ndarray,
+    original_png: Path,
+    out_html: Path,
+    title: str,
+    threshold_method: str,
+    threshold_value: int | None,
+) -> bool:
+    if not HAS_3D_RENDER_DEPS:
+        return False
+
+    binary = to_binary_volume(
+        volume, threshold_method=threshold_method, threshold_value=threshold_value
+    )
+    verts, faces, _, _ = measure.marching_cubes(binary, level=0.5)
+    x, y, z = verts[:, 2], verts[:, 1], verts[:, 0]
+    i, j, k = faces[:, 0], faces[:, 1], faces[:, 2]
+
+    mesh = go.Mesh3d(
+        x=x,
+        y=y,
+        z=z,
+        i=i,
+        j=j,
+        k=k,
+        color="#1f77b4",
+        opacity=0.55,
+        name="Isosurface",
+        showscale=False,
+    )
+
+    img = Image.open(original_png).convert("L")
+    buff = io.BytesIO()
+    img.save(buff, format="PNG")
+    encoded = base64.b64encode(buff.getvalue()).decode("ascii")
+    img_uri = f"data:image/png;base64,{encoded}"
+
+    fig = go.Figure(data=[mesh])
+    fig.update_layout(
+        title=title,
+        paper_bgcolor="white",
+        margin=dict(l=20, r=20, t=55, b=10),
+        scene=dict(
+            domain=dict(x=[0.38, 1.0], y=[0.0, 1.0]),
+            xaxis_title="X",
+            yaxis_title="Y",
+            zaxis_title="Z",
+            aspectmode="data",
+        ),
+        images=[
+            dict(
+                source=img_uri,
+                xref="paper",
+                yref="paper",
+                x=0.0,
+                y=1.0,
+                sizex=0.34,
+                sizey=0.9,
+                xanchor="left",
+                yanchor="top",
+                layer="above",
+            )
+        ],
+        annotations=[
+            dict(
+                text=f"Original 2D: {original_png.name}",
+                x=0.17,
+                y=1.02,
+                xref="paper",
+                yref="paper",
+                showarrow=False,
+                font=dict(size=13),
+            ),
+            dict(
+                text="Generated 3D Isosurface",
+                x=0.69,
+                y=1.02,
+                xref="paper",
+                yref="paper",
+                showarrow=False,
+                font=dict(size=13),
+            ),
+        ],
+    )
+    fig.write_html(str(out_html), include_plotlyjs=True)
+    return True
 
 
 def find_model_ids(root: Path) -> list[str]:
@@ -353,6 +445,15 @@ def run(
         vol = postprocess_volume(raw, image_type)
         tif_path = out_dir / f"{model_id}_generated_lf{lf}_seed{noise_seed}.tif"
         tifffile.imwrite(tif_path, vol)
+        html_path = tif_path.with_name(f"{tif_path.stem}_3d.html")
+        html_ok = save_side_by_side_html(
+            volume=vol,
+            original_png=original_png,
+            out_html=html_path,
+            title=f"{model_id} | seed={noise_seed}",
+            threshold_method=threshold_method,
+            threshold_value=threshold_value,
+        )
 
         metrics = {
             "model_id": model_id,
@@ -368,6 +469,7 @@ def run(
                 "model_prefix": str(model_prefix),
             },
             "generated_tifs": [str(tif_path)],
+            "generated_htmls": [str(html_path)] if html_ok else [],
             "generated_volume_shapes": [list(vol.shape)],
             "original_png": str(original_png),
         }
@@ -380,6 +482,7 @@ def run(
 
     comparisons: List[Dict[str, Any]] = []
     generated_tifs: List[str] = []
+    generated_htmls: List[str] = []
     per_seed_summary: List[Dict[str, Any]] = []
     volume_shapes: List[List[int]] = []
     phase_mapping_counts = {"generated": 0, "inverted_generated": 0}
@@ -401,6 +504,17 @@ def run(
             tif_path = out_dir / f"{model_id}_generated_lf{lf}_seed{seed}.tif"
         tifffile.imwrite(tif_path, vol)
         generated_tifs.append(str(tif_path))
+        html_path = tif_path.with_name(f"{tif_path.stem}_3d.html")
+        html_ok = save_side_by_side_html(
+            volume=vol,
+            original_png=original_png,
+            out_html=html_path,
+            title=f"{model_id} | seed={seed}",
+            threshold_method=threshold_method,
+            threshold_value=threshold_value,
+        )
+        if html_ok:
+            generated_htmls.append(str(html_path))
 
         rng = np.random.default_rng(seed)
         slice_rows = collect_oriented_slices(
@@ -514,13 +628,17 @@ def run(
     )
 
     sv_gen_mean = float(
-        np.mean([r["normalized_surface_density_3d_generated"] for r in per_seed_summary])
+        np.mean(
+            [r["normalized_surface_density_3d_generated"] for r in per_seed_summary]
+        )
     )
     sv_gen_std = float(
         np.std([r["normalized_surface_density_3d_generated"] for r in per_seed_summary])
     )
     sv_err_mean = float(
-        np.mean([r["normalized_surface_density_3d_abs_error"] for r in per_seed_summary])
+        np.mean(
+            [r["normalized_surface_density_3d_abs_error"] for r in per_seed_summary]
+        )
     )
     sv_err_std = float(
         np.std([r["normalized_surface_density_3d_abs_error"] for r in per_seed_summary])
@@ -580,9 +698,7 @@ def run(
         capsize=5,
     )
     ax3.set_ylabel("Phase Volume Fraction")
-    ax3.set_title(
-        f"VF 3D vs 2D (mean % err={vf_pct_mean:.2f}%, std={vf_pct_std:.2f}%)"
-    )
+    ax3.set_title(f"VF 3D vs 2D (mean % err={vf_pct_mean:.2f}%, std={vf_pct_std:.2f}%)")
     ax3.set_ylim(0, 1)
 
     ax4 = fig.add_subplot(2, 2, 4)
@@ -646,6 +762,7 @@ def run(
             "model_prefix": str(model_prefix),
         },
         "generated_tifs": generated_tifs,
+        "generated_htmls": generated_htmls,
         "generated_volume_shapes": volume_shapes,
         "original_png": str(original_png),
         "per_seed": per_seed_summary,

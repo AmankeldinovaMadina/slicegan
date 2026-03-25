@@ -12,12 +12,15 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import base64
+import io
 import webbrowser
 from pathlib import Path
 
 import numpy as np
 import plotly.graph_objects as go
 import tifffile
+from PIL import Image
 from skimage import measure
 
 
@@ -51,7 +54,7 @@ def to_binary(volume: np.ndarray, threshold: float | None) -> np.ndarray:
     return (v >= float(threshold)).astype(np.uint8)
 
 
-def build_figure(binary: np.ndarray, title: str) -> go.Figure:
+def build_figure(binary: np.ndarray, title: str, original_2d: Path | None) -> go.Figure:
     verts, faces, _, _ = measure.marching_cubes(binary, level=0.5)
     x, y, z = verts[:, 2], verts[:, 1], verts[:, 0]
     i, j, k = faces[:, 0], faces[:, 1], faces[:, 2]
@@ -73,7 +76,7 @@ def build_figure(binary: np.ndarray, title: str) -> go.Figure:
     )
 
     fig = go.Figure(data=[mesh])
-    fig.update_layout(
+    layout = dict(
         title=title,
         scene=dict(
             xaxis_title="X",
@@ -84,9 +87,53 @@ def build_figure(binary: np.ndarray, title: str) -> go.Figure:
             yaxis=dict(backgroundcolor="rgb(245,245,245)"),
             zaxis=dict(backgroundcolor="rgb(245,245,245)"),
         ),
-        margin=dict(l=0, r=0, t=50, b=0),
+        margin=dict(l=20, r=20, t=55, b=10),
         paper_bgcolor="white",
     )
+
+    if original_2d is not None:
+        img = Image.open(original_2d).convert("L")
+        buff = io.BytesIO()
+        img.save(buff, format="PNG")
+        encoded = base64.b64encode(buff.getvalue()).decode("ascii")
+        img_uri = f"data:image/png;base64,{encoded}"
+        layout["scene"]["domain"] = dict(x=[0.38, 1.0], y=[0.0, 1.0])
+        layout["images"] = [
+            dict(
+                source=img_uri,
+                xref="paper",
+                yref="paper",
+                x=0.0,
+                y=1.0,
+                sizex=0.34,
+                sizey=0.9,
+                xanchor="left",
+                yanchor="top",
+                layer="above",
+            )
+        ]
+        layout["annotations"] = [
+            dict(
+                text=f"Original 2D: {original_2d.name}",
+                x=0.17,
+                y=1.02,
+                xref="paper",
+                yref="paper",
+                showarrow=False,
+                font=dict(size=13),
+            ),
+            dict(
+                text="Generated 3D Isosurface",
+                x=0.69,
+                y=1.02,
+                xref="paper",
+                yref="paper",
+                showarrow=False,
+                font=dict(size=13),
+            ),
+        ]
+
+    fig.update_layout(**layout)
     return fig
 
 
@@ -101,6 +148,12 @@ def main() -> None:
         default=None,
         help="Binarization threshold (optional)",
     )
+    parser.add_argument(
+        "--original-2d",
+        type=str,
+        default=None,
+        help="Optional path to corresponding original 2D image",
+    )
     parser.add_argument("--out-html", type=str, default=None, help="Output HTML path")
     parser.add_argument(
         "--open", action="store_true", help="Open output HTML in browser"
@@ -113,6 +166,9 @@ def main() -> None:
 
     vol = load_volume(tif_path)
     binary = to_binary(vol, args.threshold)
+    original_2d = Path(args.original_2d) if args.original_2d else None
+    if original_2d is not None and not original_2d.exists():
+        raise FileNotFoundError(f"File not found: {original_2d}")
 
     out_html = (
         Path(args.out_html)
@@ -120,7 +176,11 @@ def main() -> None:
         else tif_path.with_suffix("").with_name(tif_path.stem + "_3d.html")
     )
 
-    fig = build_figure(binary, title=f"3D Volume Rendering: {tif_path.name}")
+    fig = build_figure(
+        binary,
+        title=f"3D Volume Rendering: {tif_path.name}",
+        original_2d=original_2d,
+    )
     fig.write_html(str(out_html), include_plotlyjs=True)
 
     print(f"Input shape: {vol.shape}")

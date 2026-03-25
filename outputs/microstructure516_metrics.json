@@ -1,0 +1,32 @@
+{
+  "model_id": "microstructure516",
+  "device": "mps",
+  "image_type": "grayscale",
+  "latent_factor_lf": 4,
+  "seeds": [
+    7,
+    11,
+    23
+  ],
+  "technical_validation_applicable": false,
+  "technical_validation_skipped_reason": "Paper technical validation metrics are defined for n-phase materials, not grayscale.",
+  "generator_files": {
+    "generator_weights": "/Users/madinaamankeldinova/Desktop/2026 spring/ra/microstructure516_Gen.pt",
+    "params_file": "/Users/madinaamankeldinova/Desktop/2026 spring/ra/microstructure516_params.data",
+    "model_prefix": "/Users/madinaamankeldinova/Desktop/2026 spring/ra/microstructure516"
+  },
+  "generated_tifs": [
+    "outputs/microstructure516_generated_lf4_seed7.tif"
+  ],
+  "generated_htmls": [
+    "outputs/microstructure516_generated_lf4_seed7_3d.html"
+  ],
+  "generated_volume_shapes": [
+    [
+      64,
+      64,
+      64
+    ]
+  ],
+  "original_png": "outputs/microstructure516_original.png"
+}

@@ -39,7 +39,9 @@ def main() -> None:
         nsd_err = m.get("normalized_surface_density_abs_error_mean", float("nan"))
         nsd_err_std = m.get("normalized_surface_density_abs_error_std", float("nan"))
         nsd_pct = m.get("normalized_surface_density_percent_error_mean", float("nan"))
-        nsd_pct_std = m.get("normalized_surface_density_percent_error_std", float("nan"))
+        nsd_pct_std = m.get(
+            "normalized_surface_density_percent_error_std", float("nan")
+        )
         rows.append(
             {
                 "model_id": data["model_id"],
