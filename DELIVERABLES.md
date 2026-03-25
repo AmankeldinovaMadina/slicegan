@@ -32,25 +32,6 @@ Generated artifacts are in outputs/:
 - Per model: *_generated_lf4.tif, *_metrics.json, *_metrics.png, *_original.png
 - Combined: metrics_summary.csv, metrics_summary.png
 
-## 3) Video recording script (voice-over)
-
-You can use this exact script while screen sharing:
-
-"In this project I used pretrained SliceGAN generators linked to the microlib dataset from the Nature Scientific Data paper.
-
-I am running on a Mac M1 machine, so I configured the workflow to use PyTorch on Apple Silicon via the MPS backend. The script automatically falls back to CPU if MPS is not available.
-
-I used the provided pretrained generator and parameter pairs, without retraining the model, to generate 3D microstructure volumes as TIFF files.
-
-For validation, I compared each generated sample against the corresponding original 2D image from the microlib dataset. I computed two metrics inspired by the paper’s technical validation approach: phase volume fraction and two-point correlation statistics.
-
-Specifically, I report volume fraction absolute error and radial two-point correlation mean absolute error. Lower values mean generated microstructures better match the original statistics.
-
-The summary plot shows that microstructure393 has the best agreement, microstructure376 is moderate, and microstructure516 is the hardest case with noticeably larger error.
-
-This indicates the pretrained models can reproduce realistic microstructure statistics in many cases, while performance varies by material complexity and image characteristics.
-
-Overall, the task demonstrates successful pretrained SliceGAN deployment, 3D generation, and quantitative comparison between original and generated structures."
 
 ## Commands used
 
